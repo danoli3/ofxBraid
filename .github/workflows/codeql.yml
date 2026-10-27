@@ -1,0 +1,53 @@
+name: CodeQL
+
+on:
+  push:
+    paths-ignore:
+      - "**/*.md"
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: linux64
+    runs-on: ubuntu-24.04
+    env:
+      OF: ${{ github.workspace }}/of
+    steps:
+      - name: openFrameworks master
+        run: git clone --depth 1 https://github.com/openframeworks/openFrameworks "$OF"
+
+      - uses: actions/checkout@v6
+        with:
+          path: of/addons/ofxBraid
+
+      - name: ofxENet
+        run: git clone --depth 1 https://github.com/danoli3/ofxENet "$OF/addons/ofxENet"
+
+      - name: Dependencies
+        run: sudo "$OF/scripts/linux/ubuntu/install_dependencies.sh" -y
+
+      - name: openFrameworks libraries
+        run: "$OF/scripts/linux/download_libs.sh" -t latest -a 64gcc6
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: c-cpp
+
+      - name: Build example_tests
+        run: make -C "$OF/addons/ofxBraid/example_tests" -j"$(getconf _NPROCESSORS_ONLN)" Release
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v4

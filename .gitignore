@@ -4,3 +4,6 @@
 *.app
 build/
 .DS_Store
+example*/bin/*
+!example*/bin/data/
+example*/obj/

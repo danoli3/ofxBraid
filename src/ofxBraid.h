@@ -1,8 +1,8 @@
 #pragma once
 
-#include "ofxBLEBitChatSession.h"
 #include "ofxENet.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -21,6 +21,32 @@
 // The receiver keeps the first copy of (peer id, seq).
 
 namespace ofxBraid {
+
+// UDP message type for a braid line. Other types are ignored.
+constexpr std::uint8_t messageType = 11;
+
+// The mesh is supplied by the app. ofxBluetoothLE's session fits SessionRadio.
+class Radio {
+public:
+	virtual ~Radio() = default;
+	virtual void sendPublic(const std::string & text) = 0;
+	virtual std::size_t size() const = 0;
+	virtual std::string textAt(std::size_t index) const = 0;
+	virtual bool mineAt(std::size_t index) const = 0;
+};
+
+template <typename Mesh>
+class SessionRadio : public Radio {
+public:
+	explicit SessionRadio(Mesh * mesh) : mesh(mesh) {}
+	void sendPublic(const std::string & text) override { mesh->sendPublic(text); }
+	std::size_t size() const override { return mesh->lines().size(); }
+	std::string textAt(std::size_t index) const override { return mesh->lines()[index].text; }
+	bool mineAt(std::size_t index) const override { return mesh->lines()[index].mine; }
+
+private:
+	Mesh * mesh = nullptr;
+};
 
 enum class Priority {
 	Net,
@@ -80,7 +106,7 @@ public:
 	Mailbox(const Mailbox &) = delete;
 	Mailbox & operator=(const Mailbox &) = delete;
 
-	void setup(ofxBLEBitChatSession * radio, const Settings & settings);
+	void setup(Radio * radio, const Settings & settings);
 	void update();
 	void stop();
 	// Live switches. Network off closes the UDP socket. Bluetooth off skips
@@ -118,7 +144,7 @@ private:
 	void stopNet();
 	std::string encryptionLabel() const;
 
-	ofxBLEBitChatSession * radio = nullptr;
+	Radio * radio = nullptr;
 	ofxENet::Peer net;
 	ofEventListener connectListener;
 	ofEventListener disconnectListener;

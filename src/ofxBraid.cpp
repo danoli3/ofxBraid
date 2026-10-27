@@ -10,12 +10,25 @@ namespace ofxBraid {
 
 namespace {
 
-constexpr std::uint8_t kMessageType = 11;
 constexpr double kRetrySeconds = 2.0;
 constexpr double kPathSeconds = 6.0;
 constexpr double kSeenSeconds = 30.0;
 constexpr int kForceIterations = 200000;
 constexpr int kHighIterations = 1000000;
+
+// danoli3/ofxENet origin takes the passphrase only (200000 rounds). A newer
+// Peer::setPassphrase forwards the iteration count. ForceHigh uses it when
+// that overload is present, and the default stretch otherwise.
+template <typename Peer>
+auto applyPassphrase(Peer & peer, const std::string & pass, int rounds, int)
+	-> decltype(peer.setPassphrase(pass, rounds), void()) {
+	peer.setPassphrase(pass, rounds);
+}
+
+template <typename Peer>
+void applyPassphrase(Peer & peer, const std::string & pass, int, long) {
+	peer.setPassphrase(pass);
+}
 
 bool isHex(const std::string & text) {
 	if (text.empty()) {
@@ -90,11 +103,11 @@ Mailbox::~Mailbox() {
 	stop();
 }
 
-void Mailbox::setup(ofxBLEBitChatSession * mesh, const Settings & next) {
+void Mailbox::setup(Radio * mesh, const Settings & next) {
 	stop();
 	radio = mesh;
 	settings = next;
-	seenMesh = radio == nullptr ? 0 : radio->lines().size();
+	seenMesh = radio == nullptr ? 0 : radio->size();
 	nextPresence = 0;
 	nextSeq = 0;
 	listening = false;
@@ -124,7 +137,7 @@ void Mailbox::applyCipher() {
 		return;
 	}
 	const int rounds = settings.encryption == Encryption::ForceHigh ? kHighIterations : kForceIterations;
-	net.setPassphrase(settings.passphrase, rounds);
+	applyPassphrase(net, settings.passphrase, rounds, 0);
 	net.requireEncryption = true;
 }
 
@@ -184,7 +197,7 @@ void Mailbox::setPolicy(bool bluetooth, bool network, Encryption encryption) {
 }
 
 void Mailbox::noteRadio() {
-	seenMesh = radio == nullptr ? 0 : radio->lines().size();
+	seenMesh = radio == nullptr ? 0 : radio->size();
 }
 
 void Mailbox::update() {
@@ -193,13 +206,12 @@ void Mailbox::update() {
 		net.update();
 	}
 	if (radio != nullptr && settings.bluetooth) {
-		const auto & lines = radio->lines();
-		while (seenMesh < lines.size()) {
-			ingest(lines[seenMesh].text, true, lines[seenMesh].mine);
+		while (seenMesh < radio->size()) {
+			ingest(radio->textAt(seenMesh), true, radio->mineAt(seenMesh));
 			++seenMesh;
 		}
 	} else if (radio != nullptr) {
-		seenMesh = radio->lines().size();
+		seenMesh = radio->size();
 	}
 	const double now = ofGetElapsedTimef();
 	if (settings.peerId.size() == 16 && now >= nextPresence) {
@@ -226,7 +238,7 @@ std::uint32_t Mailbox::send(const std::string & body, Priority priority) {
 	}
 	bool sentNet = false;
 	if (settings.network && priority != Priority::Radio && net.isRunning() && net.getNumConnections() > 0) {
-		sentNet = net.broadcast(kMessageType, wire);
+		sentNet = net.broadcast(messageType, wire);
 	}
 	const bool wantRadio = settings.bluetooth && (priority == Priority::Radio || priority == Priority::Both || !sentNet);
 	if (wantRadio) {
@@ -304,7 +316,7 @@ void Mailbox::onDisconnect(ofxENet::DisconnectionEvent & event) {
 }
 
 void Mailbox::onMessage(ofxENet::MessageEvent & event) {
-	if (event.type != kMessageType) {
+	if (event.type != messageType) {
 		return;
 	}
 	if (net.requireEncryption && !event.authentic) {

@@ -7,8 +7,8 @@ meta:
 
 common:
 	# https://github.com/danoli3/ofxENet
-	# https://github.com/danoli3/ofxBluetoothLE-experiment
-	ADDON_DEPENDENCIES = ofxENet ofxBluetoothLE
+	# The mesh is the app's Radio (Room Caller uses ofxBluetoothLE).
+	ADDON_DEPENDENCIES = ofxENet
 	ADDON_INCLUDES = src
 	ADDON_SOURCES = src/ofxBraid.cpp
 
