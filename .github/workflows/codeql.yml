@@ -40,7 +40,8 @@ jobs:
 
       - name: openFrameworks libraries
         run: |
-          "$OF/scripts/linux/download_libs.sh" -t latest -a 64gcc6
+          # master publishes openFrameworksLibs_latest_linux_64_gcc10
+          "$OF/scripts/linux/download_libs.sh" -t latest -a 64
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
