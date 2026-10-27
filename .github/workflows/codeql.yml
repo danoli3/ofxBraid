@@ -39,12 +39,14 @@ jobs:
         run: sudo "$OF/scripts/linux/ubuntu/install_dependencies.sh" -y
 
       - name: openFrameworks libraries
-        run: "$OF/scripts/linux/download_libs.sh" -t latest -a 64gcc6
+        run: |
+          "$OF/scripts/linux/download_libs.sh" -t latest -a 64gcc6
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
         with:
           languages: c-cpp
+          build-mode: manual
 
       - name: Build example_tests
         run: make -C "$OF/addons/ofxBraid/example_tests" -j"$(getconf _NPROCESSORS_ONLN)" Release
