@@ -1,0 +1,6 @@
+*.o
+*.d
+*.a
+*.app
+build/
+.DS_Store
