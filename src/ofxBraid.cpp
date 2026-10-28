@@ -58,6 +58,12 @@ char priorityChar(Priority priority) {
 	if (priority == Priority::Both) {
 		return 'b';
 	}
+	if (priority == Priority::Rak) {
+		return 'k';
+	}
+	if (priority == Priority::All) {
+		return 'a';
+	}
 	return 'n';
 }
 
@@ -68,7 +74,7 @@ std::string formatWire(Priority priority, std::uint32_t seq, const std::string &
 }
 
 bool parseWire(const std::string & line, Wire * out) {
-	// "#L <n|r|b> <8 hex> <16 hex> <body>"
+	// "#L <n|r|b|k|a> <8 hex> <16 hex> <body>"
 	if (out == nullptr || line.size() < 31 || line.compare(0, 3, "#L ") != 0) {
 		return false;
 	}
@@ -76,7 +82,7 @@ bool parseWire(const std::string & line, Wire * out) {
 		return false;
 	}
 	const char kind = line[3];
-	if (kind != 'n' && kind != 'r' && kind != 'b') {
+	if (kind != 'n' && kind != 'r' && kind != 'b' && kind != 'k' && kind != 'a') {
 		return false;
 	}
 	const std::string seqText = line.substr(5, 8);
@@ -88,6 +94,10 @@ bool parseWire(const std::string & line, Wire * out) {
 		out->priority = Priority::Radio;
 	} else if (kind == 'b') {
 		out->priority = Priority::Both;
+	} else if (kind == 'k') {
+		out->priority = Priority::Rak;
+	} else if (kind == 'a') {
+		out->priority = Priority::All;
 	} else {
 		out->priority = Priority::Net;
 	}
@@ -95,6 +105,18 @@ bool parseWire(const std::string & line, Wire * out) {
 	out->peer = peer;
 	out->body = line.substr(31);
 	return true;
+}
+
+template <typename Peer>
+void sealPeer(Peer & peer, Encryption encryption, const std::string & passphrase) {
+	if (encryption == Encryption::Off || passphrase.empty()) {
+		peer.setPassphrase("");
+		peer.requireEncryption = false;
+		return;
+	}
+	const int rounds = encryption == Encryption::ForceHigh ? kHighIterations : kForceIterations;
+	applyPassphrase(peer, passphrase, rounds, 0);
+	peer.requireEncryption = true;
 }
 
 } // namespace
@@ -113,6 +135,7 @@ void Mailbox::setup(Radio * mesh, const Settings & next) {
 	listening = false;
 	dialState.clear();
 	startNet();
+	startRak();
 }
 
 void Mailbox::stopNet() {
@@ -125,25 +148,44 @@ void Mailbox::stopNet() {
 	listening = false;
 }
 
+void Mailbox::stopRak() {
+#if defined(OFXBRAID_USE_RAKNET)
+	rakConnectListener.unsubscribe();
+	rakDisconnectListener.unsubscribe();
+	rakMessageListener.unsubscribe();
+	if (rak.isRunning()) {
+		rak.stop();
+	}
+	rakListening = false;
+#endif
+}
+
 void Mailbox::stop() {
 	stopNet();
+	stopRak();
 	radio = nullptr;
 }
 
 void Mailbox::applyCipher() {
-	if (settings.encryption == Encryption::Off || settings.passphrase.empty()) {
-		net.setPassphrase("");
-		net.requireEncryption = false;
-		return;
+	sealPeer(net, settings.encryption, settings.passphrase);
+#if defined(OFXBRAID_USE_RAKNET)
+	sealPeer(rak, settings.encryption, settings.passphrase);
+#endif
+}
+
+std::uint16_t Mailbox::rakListenPort() const {
+	if (settings.rakPort != 0) {
+		return settings.rakPort;
 	}
-	const int rounds = settings.encryption == Encryption::ForceHigh ? kHighIterations : kForceIterations;
-	applyPassphrase(net, settings.passphrase, rounds, 0);
-	net.requireEncryption = true;
+	if (settings.port == 65535) {
+		return 60101;
+	}
+	return static_cast<std::uint16_t>(settings.port + 1);
 }
 
 void Mailbox::startNet() {
 	stopNet();
-	applyCipher();
+	sealPeer(net, settings.encryption, settings.passphrase);
 	if (!settings.network) {
 		dialState = "network off";
 		return;
@@ -168,6 +210,33 @@ void Mailbox::startNet() {
 		disconnectListener = net.onDisconnect.newListener([this](ofxENet::DisconnectionEvent & event) { onDisconnect(event); });
 		messageListener = net.onMessage.newListener([this](ofxENet::MessageEvent & event) { onMessage(event); });
 	}
+}
+
+void Mailbox::startRak() {
+	stopRak();
+#if defined(OFXBRAID_USE_RAKNET)
+	if (!settings.raknet) {
+		return;
+	}
+	sealPeer(rak, settings.encryption, settings.passphrase);
+	const std::uint16_t port = rakListenPort();
+	if (settings.listen) {
+		rakListening = rak.startServer(port, 16, settings.passphrase);
+		ofLogNotice("ofxBraid") << (rakListening ? "rak listening on " : "rak could not listen on ") << port;
+	} else if (!settings.connectHost.empty()) {
+		if (rak.startClient()) {
+			rak.connect(settings.connectHost, port, settings.passphrase);
+			ofLogNotice("ofxBraid") << "rak dialing " << settings.connectHost << ":" << port;
+		} else {
+			ofLogNotice("ofxBraid") << "rak dial failed";
+		}
+	}
+	if (rak.isRunning()) {
+		rakConnectListener = rak.onConnect.newListener([this](ofxRakNet::ConnectionEvent & event) { onRakConnect(event); });
+		rakDisconnectListener = rak.onDisconnect.newListener([this](ofxRakNet::DisconnectionEvent & event) { onRakDisconnect(event); });
+		rakMessageListener = rak.onMessage.newListener([this](ofxRakNet::MessageEvent & event) { onRakMessage(event); });
+	}
+#endif
 }
 
 void Mailbox::setPolicy(bool bluetooth, bool network, Encryption encryption) {
@@ -205,9 +274,14 @@ void Mailbox::update() {
 	if (net.isRunning()) {
 		net.update();
 	}
+#if defined(OFXBRAID_USE_RAKNET)
+	if (rak.isRunning()) {
+		rak.update();
+	}
+#endif
 	if (radio != nullptr && settings.bluetooth) {
 		while (seenMesh < radio->size()) {
-			ingest(radio->textAt(seenMesh), true, radio->mineAt(seenMesh));
+			ingest(radio->textAt(seenMesh), Arrival::Radio, radio->mineAt(seenMesh));
 			++seenMesh;
 		}
 	} else if (radio != nullptr) {
@@ -216,7 +290,12 @@ void Mailbox::update() {
 	const double now = ofGetElapsedTimef();
 	if (settings.peerId.size() == 16 && now >= nextPresence) {
 		nextPresence = now + 2.0;
-		send("#P " + settings.signingKey + " " + settings.nick, Priority::Both);
+#if defined(OFXBRAID_USE_RAKNET)
+		const Priority presence = settings.raknet ? Priority::All : Priority::Both;
+#else
+		const Priority presence = Priority::Both;
+#endif
+		send("#P " + settings.signingKey + " " + settings.nick, presence);
 	}
 }
 
@@ -237,10 +316,21 @@ std::uint32_t Mailbox::send(const std::string & body, Priority priority) {
 		inbox.push_back(packet);
 	}
 	bool sentNet = false;
-	if (settings.network && priority != Priority::Radio && net.isRunning() && net.getNumConnections() > 0) {
+	if (settings.network && priority != Priority::Radio && priority != Priority::Rak && net.isRunning() && net.getNumConnections() > 0) {
 		sentNet = net.broadcast(messageType, wire);
 	}
-	const bool wantRadio = settings.bluetooth && (priority == Priority::Radio || priority == Priority::Both || !sentNet);
+	bool sentRak = false;
+#if defined(OFXBRAID_USE_RAKNET)
+	const bool tryRak = settings.raknet && rak.isRunning() && rak.getNumConnections() > 0
+		&& (priority == Priority::Rak || priority == Priority::All || (priority == Priority::Net && !sentNet));
+	if (tryRak) {
+		sentRak = rak.broadcast(messageType, wire);
+	}
+#endif
+	const bool sentIp = sentNet || sentRak;
+	const bool fanout = priority == Priority::Radio || priority == Priority::Both || priority == Priority::All;
+	const bool fallback = (priority == Priority::Net || priority == Priority::Rak) && !sentIp;
+	const bool wantRadio = settings.bluetooth && (fanout || fallback);
 	if (wantRadio) {
 		sendRadio(wire);
 		return seq;
@@ -269,6 +359,13 @@ std::string Mailbox::status() const {
 		text += " " + settings.connectHost + ":" + ofToString(settings.port);
 	}
 	text += "   net " + ofToString(net.isRunning() ? net.getNumConnections() : 0);
+	if (settings.raknet) {
+#if defined(OFXBRAID_USE_RAKNET)
+		text += "   rak " + ofToString(rak.isRunning() ? rak.getNumConnections() : 0);
+#else
+		text += "   rak unavailable";
+#endif
+	}
 	for (const auto & user : roster) {
 		if (user.peerId == settings.peerId) {
 			continue;
@@ -280,6 +377,9 @@ std::string Mailbox::status() const {
 		}
 		if (user.net) {
 			text += "  net";
+		}
+		if (user.rak) {
+			text += "  rak";
 		}
 		if (user.signingKey.size() >= 8) {
 			text += "  " + user.signingKey.substr(0, 8);
@@ -304,15 +404,7 @@ void Mailbox::onDisconnect(ofxENet::DisconnectionEvent & event) {
 		dialState = event.reason == ofxENet::DisconnectionEvent::Reason::ConnectFailed ? "dial failed" : "down";
 	}
 	ofLogNotice("ofxBraid") << "net down " << ofxENet::toString(event.reason);
-	const double now = ofGetElapsedTimef();
-	for (auto & item : recent) {
-		if (item.sentRadio || now - item.at > kRetrySeconds) {
-			continue;
-		}
-		ofLogNotice("ofxBraid") << "radio retry";
-		sendRadio(item.wire);
-		item.sentRadio = true;
-	}
+	retryRecent();
 }
 
 void Mailbox::onMessage(ofxENet::MessageEvent & event) {
@@ -327,19 +419,54 @@ void Mailbox::onMessage(ofxENet::MessageEvent & event) {
 		return;
 	}
 	bindNet(wire.peer, event.peer, event.address);
-	ingest(event.getText(), false, false);
+	ingest(event.getText(), Arrival::Net, false);
 }
 
-void Mailbox::ingest(const std::string & text, bool fromRadio, bool mine) {
+#if defined(OFXBRAID_USE_RAKNET)
+void Mailbox::onRakConnect(ofxRakNet::ConnectionEvent & event) {
+	ofLogNotice("ofxBraid") << "rak up " << event.address << " id " << event.peer;
+}
+
+void Mailbox::onRakDisconnect(ofxRakNet::DisconnectionEvent & event) {
+	for (auto & user : roster) {
+		if (user.rakId == event.peer) {
+			user.rak = false;
+			user.rakId = 0;
+		}
+	}
+	ofLogNotice("ofxBraid") << "rak down " << ofxRakNet::toString(event.reason);
+	retryRecent();
+}
+
+void Mailbox::onRakMessage(ofxRakNet::MessageEvent & event) {
+	if (event.type != messageType) {
+		return;
+	}
+	if (rak.requireEncryption && !event.authentic) {
+		return;
+	}
+	Wire wire;
+	if (!parseWire(event.getText(), &wire)) {
+		return;
+	}
+	bindRak(wire.peer, event.peer, event.address);
+	ingest(event.getText(), Arrival::Rak, false);
+}
+#endif
+
+void Mailbox::ingest(const std::string & text, Arrival how, bool mine) {
 	Wire wire;
 	if (!parseWire(text, &wire)) {
 		return;
 	}
 	const double now = ofGetElapsedTimef();
 	User & user = ensure(wire.peer);
-	if (fromRadio) {
+	if (how == Arrival::Radio) {
 		user.radio = true;
 		user.radioSeen = now;
+	} else if (how == Arrival::Rak) {
+		user.rak = true;
+		user.rakSeen = now;
 	} else {
 		user.net = true;
 		user.netSeen = now;
@@ -360,7 +487,8 @@ void Mailbox::ingest(const std::string & text, bool fromRadio, bool mine) {
 	packet.nick = user.nick.empty() ? wire.peer : user.nick;
 	packet.body = wire.body;
 	packet.mine = mine || wire.peer == settings.peerId;
-	packet.fromRadio = fromRadio;
+	packet.fromRadio = how == Arrival::Radio;
+	packet.fromRak = how == Arrival::Rak;
 	inbox.push_back(packet);
 }
 
@@ -376,6 +504,20 @@ void Mailbox::bindNet(const std::string & peer, ofxENet::PeerId id, const std::s
 	user.netAddress = address;
 	user.net = true;
 	user.netSeen = ofGetElapsedTimef();
+}
+
+void Mailbox::bindRak(const std::string & peer, std::uint64_t id, const std::string & address) {
+	for (auto & user : roster) {
+		if (user.rakId == id && user.peerId != peer) {
+			user.rakId = 0;
+			user.rak = false;
+		}
+	}
+	User & user = ensure(peer);
+	user.rakId = id;
+	user.rakAddress = address;
+	user.rak = true;
+	user.rakSeen = ofGetElapsedTimef();
 }
 
 User & Mailbox::ensure(const std::string & peer) {
@@ -408,6 +550,18 @@ void Mailbox::sendRadio(const std::string & wire) {
 	}
 }
 
+void Mailbox::retryRecent() {
+	const double now = ofGetElapsedTimef();
+	for (auto & item : recent) {
+		if (item.sentRadio || now - item.at > kRetrySeconds) {
+			continue;
+		}
+		ofLogNotice("ofxBraid") << "radio retry";
+		sendRadio(item.wire);
+		item.sentRadio = true;
+	}
+}
+
 std::string Mailbox::encryptionLabel() const {
 	if (settings.encryption == Encryption::Off) {
 		return "udp plaintext";
@@ -426,6 +580,9 @@ void Mailbox::refresh() {
 		}
 		if (user.net && user.netId == 0 && now - user.netSeen > kPathSeconds) {
 			user.net = false;
+		}
+		if (user.rak && user.rakId == 0 && now - user.rakSeen > kPathSeconds) {
+			user.rak = false;
 		}
 	}
 	std::vector<std::pair<std::string, double>> keptSeen;

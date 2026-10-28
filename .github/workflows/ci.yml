@@ -37,6 +37,9 @@ jobs:
       - name: ofxENet
         run: git clone --depth 1 https://github.com/danoli3/ofxENet "$OF/addons/ofxENet"
 
+      - name: ofxRakNet mafianet
+        run: git clone --depth 1 --branch mafianet https://github.com/danoli3/ofxRakNet "$OF/addons/ofxRakNet"
+
       - name: Dependencies (linux64)
         if: matrix.name == 'linux64'
         run: sudo "$OF/scripts/linux/ubuntu/install_dependencies.sh" -y

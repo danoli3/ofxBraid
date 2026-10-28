@@ -17,6 +17,7 @@ namespace {
 
 const std::uint16_t kPort = 60131;
 const std::uint16_t kAttackPort = 60132;
+const std::uint16_t kRakPort = 60133;
 const std::string kPass = "braid-test";
 const std::string kHostPeer = "3dbef9edfd1f62b9";
 const std::string kClientPeer = "a1b2c3d4e5f60718";
@@ -82,6 +83,7 @@ class ofApp : public ofxUnitTestsApp {
 	void run() {
 		testLocal();
 		testPeers();
+		testTunnels();
 		testEncryption();
 		testSecurity();
 	}
@@ -117,6 +119,7 @@ class ofApp : public ofxUnitTestsApp {
 		const std::string status = box.status();
 		ofxTest(status.find("network off") != std::string::npos, "status names network off");
 		ofxTest(status.find("bluetooth off") != std::string::npos, "status names bluetooth off");
+		ofxTest(status.find("rak") == std::string::npos, "rak stays off unless asked");
 		ofxTest(status.find("udp aes-256-gcm") != std::string::npos, "default cipher label");
 
 		box.setPolicy(true, false, ofxBraid::Encryption::Off);
@@ -188,6 +191,91 @@ class ofApp : public ofxUnitTestsApp {
 		ofxTestEq(client.take().size(), std::size_t(1), "radio priority is kept locally");
 		pump(host, client, [&] { return false; }, 200);
 		ofxTest(host.take().empty(), "radio priority does not cross the socket");
+
+		host.stop();
+		client.stop();
+	}
+
+	void testTunnels() {
+		ofxBraid::Mailbox host;
+		ofxBraid::Mailbox client;
+		auto hostSettings = person(kHostPeer, kHostKey, "RoomCaller", true);
+		auto clientSettings = person(kClientPeer, kClientKey, "phone", false);
+		hostSettings.raknet = true;
+		clientSettings.raknet = true;
+		hostSettings.rakPort = kRakPort;
+		clientSettings.rakPort = kRakPort;
+		host.setup(nullptr, hostSettings);
+		client.setup(nullptr, clientSettings);
+
+		ofxTest(pump(host, client, [&] {
+			return host.status().find("net 1") != std::string::npos
+				&& host.status().find("rak 1") != std::string::npos
+				&& client.status().find("net 1") != std::string::npos
+				&& client.status().find("rak 1") != std::string::npos;
+		}), "enet and mafianet both connect");
+		ofxTest(pump(host, client, [&] {
+			const auto * user = findUser(host, kClientPeer);
+			return user != nullptr && user->net && user->rak && user->netId != 0 && user->rakId != 0;
+		}), "the same person is on both udp sockets");
+		host.take();
+		client.take();
+
+		const auto rakSeq = client.send("#G M rak", ofxBraid::Priority::Rak);
+		std::vector<ofxBraid::Packet> rakGot;
+		ofxTest(pump(host, client, [&] {
+			auto next = host.take();
+			if (!next.empty()) {
+				rakGot.insert(rakGot.end(), next.begin(), next.end());
+			}
+			return !rakGot.empty();
+		}), "rak priority arrives");
+		ofxTestEq(rakGot.size(), std::size_t(1), "rak priority arrives once");
+		if (!rakGot.empty()) {
+			ofxTestEq(rakGot[0].seq, rakSeq, "rak packet id");
+			ofxTest(rakGot[0].fromRak, "rak priority is the mafianet tunnel");
+			ofxTest(!rakGot[0].fromRadio, "rak priority is not the radio");
+		}
+		pump(host, client, [&] { return false; }, 200);
+		ofxTest(host.take().empty(), "rak priority is not delivered twice");
+
+		client.send("#G M all", ofxBraid::Priority::All);
+		client.take();
+		std::vector<ofxBraid::Packet> allGot;
+		ofxTest(pump(host, client, [&] {
+			auto next = host.take();
+			if (!next.empty()) {
+				allGot.insert(allGot.end(), next.begin(), next.end());
+			}
+			return !allGot.empty();
+		}), "priority all arrives");
+		ofxTestEq(allGot.size(), std::size_t(1), "priority all is one copy");
+		pump(host, client, [&] { return false; }, 200);
+		ofxTest(host.take().empty(), "the other tunnels do not deliver a second copy");
+
+		host.setPolicy(false, false, ofxBraid::Encryption::Force);
+		client.setPolicy(false, false, ofxBraid::Encryption::Force);
+		ofxTest(host.status().find("net 0") != std::string::npos, "enet stops");
+		ofxTest(host.status().find("rak 1") != std::string::npos, "mafianet stays up");
+		ofxTest(client.status().find("rak 1") != std::string::npos, "client mafianet stays up");
+
+		host.take();
+		client.take();
+		const auto failSeq = client.send("#G M failover", ofxBraid::Priority::Net);
+		std::vector<ofxBraid::Packet> failGot;
+		ofxTest(pump(host, client, [&] {
+			auto next = host.take();
+			if (!next.empty()) {
+				failGot.insert(failGot.end(), next.begin(), next.end());
+			}
+			return !failGot.empty();
+		}), "net falls over to mafianet");
+		ofxTestEq(failGot.size(), std::size_t(1), "failover arrives once");
+		if (!failGot.empty()) {
+			ofxTestEq(failGot[0].seq, failSeq, "failover packet id");
+			ofxTest(failGot[0].fromRak, "failover uses mafianet");
+			ofxTest(!failGot[0].fromRadio, "failover is not the radio");
+		}
 
 		host.stop();
 		client.stop();

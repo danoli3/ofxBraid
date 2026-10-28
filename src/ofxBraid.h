@@ -1,24 +1,33 @@
 #pragma once
 
 #include "ofxENet.h"
+#if defined(OFXBRAID_USE_RAKNET)
+#include "ofxRakNet.h"
+#endif
 
 #include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
 
-// ofxBraid keeps one person on two paths.
+// ofxBraid keeps one person on three tunnels.
 //
 // The person is the Bluetooth identity file. On the wire that is the 16-hex
 // peer id (stable across launches). A presence line also carries the 64-hex
-// Ed25519 signing key, which is what an allowlist already uses. An ENet peer
-// number is only the UDP socket for this process. It is never the user id.
+// Ed25519 signing key, which is what an allowlist already uses. An ENet or
+// RakNet peer number is only the UDP socket for this process. It is never
+// the user id.
 //
-// Priority::Net sends on ENet when any peer is connected. If that send fails,
-// or a peer drops within two seconds, the same packet id is sent on the
-// Bluetooth mesh. Priority::Radio is the mesh only. Priority::Both is how a
-// presence line reaches a phone that has only one of the two paths.
+// Priority::Net sends on ENet when any peer is connected. If that socket is
+// down and ofxRakNet (MafiaNet) is up, the same packet uses that tunnel. If
+// neither IP tunnel accepts it, or a peer drops within two seconds, it is
+// sent on the Bluetooth mesh. Priority::Rak is the MafiaNet tunnel, with the
+// same radio fallback. Priority::Radio is the mesh only. Priority::Both is
+// ENet and the mesh. Priority::All is all three at once.
 // The receiver keeps the first copy of (peer id, seq).
+//
+// The MafiaNet tunnel is compiled in with OFXBRAID_USE_RAKNET and
+// danoli3/ofxRakNet branch mafianet. Without that, settings.raknet is ignored.
 
 namespace ofxBraid {
 
@@ -52,6 +61,8 @@ enum class Priority {
 	Net,
 	Radio,
 	Both,
+	Rak,
+	All,
 };
 
 // Off: UDP payloads are plaintext. Force: AES-256-GCM and plaintext is
@@ -74,6 +85,10 @@ struct Settings {
 	std::string nick;
 	bool bluetooth = true;
 	bool network = true;
+	// Third tunnel: ofxRakNet on the mafianet branch. UDP port is rakPort,
+	// or port + 1 when rakPort is 0. ENet keeps port.
+	bool raknet = false;
+	std::uint16_t rakPort = 0;
 	Encryption encryption = Encryption::Force;
 };
 
@@ -82,11 +97,15 @@ struct User {
 	std::string signingKey;
 	std::string nick;
 	std::string netAddress;
+	std::string rakAddress;
 	ofxENet::PeerId netId = 0;
+	std::uint64_t rakId = 0;
 	double radioSeen = 0;
 	double netSeen = 0;
+	double rakSeen = 0;
 	bool radio = false;
 	bool net = false;
+	bool rak = false;
 };
 
 struct Packet {
@@ -96,6 +115,7 @@ struct Packet {
 	std::string body;
 	bool mine = false;
 	bool fromRadio = false;
+	bool fromRak = false;
 };
 
 class Mailbox {
@@ -133,22 +153,40 @@ private:
 	void onConnect(ofxENet::ConnectionEvent & event);
 	void onDisconnect(ofxENet::DisconnectionEvent & event);
 	void onMessage(ofxENet::MessageEvent & event);
-	void ingest(const std::string & text, bool fromRadio, bool mine);
+#if defined(OFXBRAID_USE_RAKNET)
+	void onRakConnect(ofxRakNet::ConnectionEvent & event);
+	void onRakDisconnect(ofxRakNet::DisconnectionEvent & event);
+	void onRakMessage(ofxRakNet::MessageEvent & event);
+#endif
 	void bindNet(const std::string & peer, ofxENet::PeerId id, const std::string & address);
+	void bindRak(const std::string & peer, std::uint64_t id, const std::string & address);
 	User & ensure(const std::string & peer);
 	bool remember(const std::string & peer, std::uint32_t seq);
 	void sendRadio(const std::string & wire);
+	void retryRecent();
 	void refresh();
 	void applyCipher();
 	void startNet();
 	void stopNet();
+	void startRak();
+	void stopRak();
+	std::uint16_t rakListenPort() const;
 	std::string encryptionLabel() const;
+	enum class Arrival { Net, Rak, Radio };
+	void ingest(const std::string & text, Arrival how, bool mine);
 
 	Radio * radio = nullptr;
 	ofxENet::Peer net;
 	ofEventListener connectListener;
 	ofEventListener disconnectListener;
 	ofEventListener messageListener;
+#if defined(OFXBRAID_USE_RAKNET)
+	ofxRakNet::Peer rak;
+	ofEventListener rakConnectListener;
+	ofEventListener rakDisconnectListener;
+	ofEventListener rakMessageListener;
+	bool rakListening = false;
+#endif
 
 	Settings settings;
 	std::vector<User> roster;
